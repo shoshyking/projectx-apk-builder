@@ -1,0 +1,531 @@
+name: Build ProjectX APK
+
+on:
+  repository_dispatch:
+    types: [projectx_apk_build]
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read dispatch payload
+        run: |
+          echo "PROJECT_ID=${{ github.event.client_payload.project_id }}" >> $GITHUB_ENV
+          echo "JOB_ID=${{ github.event.client_payload.job_id }}" >> $GITHUB_ENV
+          echo "USER_ID=${{ github.event.client_payload.user_id }}" >> $GITHUB_ENV
+
+      - name: Validate payload
+        run: |
+          if [ -z "$PROJECT_ID" ]; then
+            echo "Missing PROJECT_ID"
+            exit 1
+          fi
+
+          if [ -z "$JOB_ID" ]; then
+            echo "Missing JOB_ID"
+            exit 1
+          fi
+
+          if [ -z "$USER_ID" ]; then
+            echo "Missing USER_ID"
+            exit 1
+          fi
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: "stable"
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq python3
+
+      - name: Mark job as building
+        run: |
+          curl -s -X PATCH "${{ secrets.SUPABASE_URL }}/rest/v1/projects?id=eq.${PROJECT_ID}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{
+              "build_status": "building",
+              "build_error": null
+            }'
+
+          curl -s -X PATCH "${{ secrets.SUPABASE_URL }}/rest/v1/apk_build_jobs?id=eq.${JOB_ID}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{
+              "status": "building",
+              "updated_at": "'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"
+            }'
+
+      - name: Fetch project blueprint
+        run: |
+          curl -s "${{ secrets.SUPABASE_URL }}/rest/v1/projects?id=eq.${PROJECT_ID}&select=*" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            > project.json
+
+          cat project.json
+
+          COUNT=$(jq length project.json)
+
+          if [ "$COUNT" = "0" ]; then
+            echo "Project not found"
+            exit 1
+          fi
+
+      - name: Generate Flutter project from blueprint
+        run: |
+          python3 << 'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          with open("project.json", "r", encoding="utf-8") as f:
+              projects = json.load(f)
+
+          project = projects[0]
+
+          title = str(project.get("title") or "ProjectX Generated App")
+          project_type = str(project.get("project_type") or "AI App Project")
+          description = str(project.get("description") or project.get("prompt") or "Generated with ProjectX Ultra")
+
+          features = project.get("features") or []
+          screens = project.get("screens") or []
+          stack = project.get("recommended_stack") or []
+          roadmap = project.get("build_steps") or []
+          users = project.get("target_users") or []
+          monetization = project.get("monetization_plan") or []
+          mvp = project.get("mvp_scope") or []
+          next_steps = project.get("next_steps") or []
+
+          def as_list(value):
+              if isinstance(value, list):
+                  return [str(x) for x in value]
+              if isinstance(value, str):
+                  try:
+                      decoded = json.loads(value)
+                      if isinstance(decoded, list):
+                          return [str(x) for x in decoded]
+                  except Exception:
+                      return [value]
+              return []
+
+          features = as_list(features)
+          screens = as_list(screens)
+          stack = as_list(stack)
+          roadmap = as_list(roadmap)
+          users = as_list(users)
+          monetization = as_list(monetization)
+          mvp = as_list(mvp)
+          next_steps = as_list(next_steps)
+
+          app_name = re.sub(r"[^a-zA-Z0-9_]", "_", title.lower())
+          app_name = re.sub(r"_+", "_", app_name).strip("_")
+
+          if not app_name:
+              app_name = "projectx_generated_app"
+
+          if app_name[0].isdigit():
+              app_name = "app_" + app_name
+
+          subprocess.run(["flutter", "create", "--platforms=android", app_name], check=True)
+
+          root = Path(app_name)
+          lib = root / "lib"
+          android_manifest = root / "android" / "app" / "src" / "main" / "AndroidManifest.xml"
+
+          def dart_string(value):
+              return json.dumps(str(value))
+
+          def dart_list(values):
+              return "[" + ",".join(dart_string(v) for v in values) + "]"
+
+          main_dart = f'''
+          import 'package:flutter/material.dart';
+
+          void main() {{
+            runApp(const GeneratedProjectApp());
+          }}
+
+          class GeneratedProjectApp extends StatelessWidget {{
+            const GeneratedProjectApp({{super.key}});
+
+            @override
+            Widget build(BuildContext context) {{
+              return MaterialApp(
+                debugShowCheckedModeBanner: false,
+                title: {dart_string(title)},
+                theme: ThemeData(
+                  useMaterial3: true,
+                  brightness: Brightness.dark,
+                  scaffoldBackgroundColor: const Color(0xFF070A12),
+                  colorScheme: ColorScheme.fromSeed(
+                    seedColor: const Color(0xFF8B5CF6),
+                    brightness: Brightness.dark,
+                  ),
+                ),
+                home: const HomeScreen(),
+              );
+            }}
+          }}
+
+          class HomeScreen extends StatelessWidget {{
+            const HomeScreen({{super.key}});
+
+            static const String projectTitle = {dart_string(title)};
+            static const String projectType = {dart_string(project_type)};
+            static const String projectDescription = {dart_string(description)};
+
+            static const List<String> features = {dart_list(features)};
+            static const List<String> screens = {dart_list(screens)};
+            static const List<String> stack = {dart_list(stack)};
+            static const List<String> roadmap = {dart_list(roadmap)};
+            static const List<String> users = {dart_list(users)};
+            static const List<String> monetization = {dart_list(monetization)};
+            static const List<String> mvp = {dart_list(mvp)};
+            static const List<String> nextSteps = {dart_list(next_steps)};
+
+            @override
+            Widget build(BuildContext context) {{
+              return Scaffold(
+                body: Container(
+                  width: double.infinity,
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [
+                        Color(0xFF070A12),
+                        Color(0xFF111827),
+                        Color(0xFF1E1B4B),
+                      ],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
+                  child: SafeArea(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(18),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _hero(),
+                          const SizedBox(height: 18),
+                          _section('Target Users', users),
+                          _section('Core Features', features),
+                          _section('Screens Needed', screens),
+                          _section('Recommended Stack', stack),
+                          _section('Monetization Plan', monetization),
+                          _section('MVP Scope', mvp),
+                          _section('Build Roadmap', roadmap),
+                          _section('Next Steps', nextSteps),
+                          const SizedBox(height: 30),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }}
+
+            Widget _hero() {{
+              return Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(28),
+                  gradient: const LinearGradient(
+                    colors: [
+                      Color(0xFF312E81),
+                      Color(0xFF4C1D95),
+                      Color(0xFF0F172A),
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  border: Border.all(color: Colors.white12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.35),
+                      blurRadius: 40,
+                      offset: const Offset(0, 20),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 58,
+                      height: 58,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(20),
+                        gradient: const LinearGradient(
+                          colors: [
+                            Color(0xFF8B5CF6),
+                            Color(0xFF06B6D4),
+                          ],
+                        ),
+                      ),
+                      child: const Icon(
+                        Icons.auto_awesome,
+                        color: Colors.white,
+                        size: 30,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      projectTitle,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 31,
+                        fontWeight: FontWeight.w900,
+                        height: 1.08,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      projectType,
+                      style: const TextStyle(
+                        color: Color(0xFF93C5FD),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      projectDescription,
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.72),
+                        fontSize: 15,
+                        height: 1.45,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 54,
+                      child: ElevatedButton.icon(
+                        onPressed: () {{}},
+                        icon: const Icon(Icons.rocket_launch),
+                        label: const Text(
+                          'Start Building',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 16,
+                          ),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF8B5CF6),
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }}
+
+            Widget _section(String title, List<String> items) {{
+              final cleanItems = items.where((item) => item.trim().isNotEmpty).toList();
+
+              if (cleanItems.isEmpty) {{
+                return const SizedBox.shrink();
+              }}
+
+              return Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.06),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.12),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    ...cleanItems.asMap().entries.map(
+                      (entry) => _item(entry.key + 1, entry.value),
+                    ),
+                  ],
+                ),
+              );
+            }}
+
+            Widget _item(int number, String text) {{
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 11),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 26,
+                      height: 26,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF8B5CF6).withOpacity(0.25),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: const Color(0xFF8B5CF6).withOpacity(0.35),
+                        ),
+                      ),
+                      child: Text(
+                        number.toString(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        text,
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.76),
+                          fontSize: 14,
+                          height: 1.42,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }}
+          }}
+          '''
+
+          (lib / "main.dart").write_text(main_dart, encoding="utf-8")
+
+          if android_manifest.exists():
+              text = android_manifest.read_text(encoding="utf-8")
+              text = text.replace('android:label="' + app_name + '"', 'android:label="' + title.replace('"', '') + '"')
+              android_manifest.write_text(text, encoding="utf-8")
+
+          print(f"Generated Flutter project: {app_name}")
+          print(f"APP_DIR={app_name}")
+          with open("app_dir.txt", "w", encoding="utf-8") as f:
+              f.write(app_name)
+          PY
+
+      - name: Build release APK
+        run: |
+          APP_DIR=$(cat app_dir.txt)
+          cd "$APP_DIR"
+          flutter pub get
+          flutter build apk --release
+
+      - name: Prepare APK file
+        run: |
+          APP_DIR=$(cat app_dir.txt)
+          mkdir -p output
+          cp "$APP_DIR/build/app/outputs/flutter-apk/app-release.apk" "output/projectx-${PROJECT_ID}.apk"
+          ls -lah output
+
+      - name: Upload APK to Supabase Storage
+        run: |
+          APK_PATH="output/projectx-${PROJECT_ID}.apk"
+          STORAGE_PATH="${USER_ID}/${PROJECT_ID}/${JOB_ID}.apk"
+
+          curl -s -X POST "${{ secrets.SUPABASE_URL }}/storage/v1/object/project-apks/${STORAGE_PATH}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            --data-binary "@${APK_PATH}" \
+            > upload_response.json
+
+          cat upload_response.json
+
+          APK_URL="${{ secrets.SUPABASE_URL }}/storage/v1/object/public/project-apks/${STORAGE_PATH}"
+          echo "APK_URL=${APK_URL}" >> $GITHUB_ENV
+
+      - name: Update Supabase with APK URL
+        run: |
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          curl -s -X PATCH "${{ secrets.SUPABASE_URL }}/rest/v1/projects?id=eq.${PROJECT_ID}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{
+              "build_status": "ready",
+              "apk_url": "'"${APK_URL}"'",
+              "build_finished_at": "'"${NOW}"'",
+              "build_error": null
+            }'
+
+          curl -s -X PATCH "${{ secrets.SUPABASE_URL }}/rest/v1/apk_build_jobs?id=eq.${JOB_ID}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{
+              "status": "ready",
+              "apk_url": "'"${APK_URL}"'",
+              "updated_at": "'"${NOW}"'"
+            }'
+
+      - name: Upload APK as GitHub artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: projectx-generated-apk
+          path: output/*.apk
+
+      - name: Mark build as failed
+        if: failure()
+        run: |
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          curl -s -X PATCH "${{ secrets.SUPABASE_URL }}/rest/v1/projects?id=eq.${PROJECT_ID}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{
+              "build_status": "failed",
+              "build_finished_at": "'"${NOW}"'",
+              "build_error": "GitHub Actions APK build failed. Open the workflow logs for details."
+            }'
+
+          curl -s -X PATCH "${{ secrets.SUPABASE_URL }}/rest/v1/apk_build_jobs?id=eq.${JOB_ID}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{
+              "status": "failed",
+              "error": "GitHub Actions APK build failed. Open the workflow logs for details.",
+              "updated_at": "'"${NOW}"'"
+            }'
